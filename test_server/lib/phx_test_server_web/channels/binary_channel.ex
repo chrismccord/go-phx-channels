@@ -9,7 +9,7 @@ defmodule PhxTestServerWeb.BinaryChannel do
   @impl true
   def handle_in("binary_data", {:binary, data}, socket) do
     # Process binary data and respond with processed binary
-    processed_data = <<byte::binary, 100>> for <<byte::binary-size(1) <- data>>, into: <<>>
+    processed_data = for <<byte::binary-size(1) <- data>>, into: <<>>, do: <<byte::binary, 100>>
     {:reply, {:ok, {:binary, processed_data}}, socket}
   end
 

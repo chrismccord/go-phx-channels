@@ -34,11 +34,11 @@ type EventBinding struct {
 	callback EventCallback
 }
 
-// Channel represents a Phoenix channel using goroutines and channels
-type Channel struct {
+// ChannelV2 represents a Phoenix channel using goroutines and channels
+type ChannelV2 struct {
 	topic    string
 	params   map[string]interface{}
-	socket   *Socket
+	socket   *SocketV2
 
 	// Communication
 	commands chan ChannelCommand
@@ -59,15 +59,15 @@ type Channel struct {
 	wg     sync.WaitGroup
 }
 
-// NewChannel creates a new lock-free channel
-func NewChannel(topic string, params map[string]interface{}, socket *Socket) *Channel {
+// NewChannelV2 creates a new lock-free channel
+func NewChannelV2(topic string, params map[string]interface{}, socket *SocketV2) *ChannelV2 {
 	if params == nil {
 		params = make(map[string]interface{})
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	ch := &Channel{
+	ch := &ChannelV2{
 		topic:    topic,
 		params:   params,
 		socket:   socket,
@@ -91,7 +91,7 @@ func NewChannel(topic string, params map[string]interface{}, socket *Socket) *Ch
 }
 
 // channelManager is the main goroutine that owns channel state
-func (ch *Channel) channelManager() {
+func (ch *ChannelV2) channelManager() {
 	defer ch.wg.Done()
 
 	for {
@@ -109,7 +109,7 @@ func (ch *Channel) channelManager() {
 }
 
 // handleCommand processes commands from the public API
-func (ch *Channel) handleCommand(cmd ChannelCommand) {
+func (ch *ChannelV2) handleCommand(cmd ChannelCommand) {
 	switch cmd.Type {
 	case "join":
 		result := ch.doJoin(cmd.Data)
@@ -175,19 +175,13 @@ func (ch *Channel) handleCommand(cmd ChannelCommand) {
 		if cmd.Response != nil {
 			cmd.Response <- ch.joinRef
 		}
-
-	case "join_success":
-		ch.state = ChannelJoined
-
-	case "join_error":
-		ch.state = ChannelErrored
 	}
 }
 
 // Public API methods
 
 // Join joins the channel
-func (ch *Channel) Join(timeout ...time.Duration) *Push {
+func (ch *ChannelV2) Join(timeout ...time.Duration) *PushV2 {
 	var joinTimeout time.Duration = ch.timeout
 	if len(timeout) > 0 {
 		joinTimeout = timeout[0]
@@ -203,11 +197,11 @@ func (ch *Channel) Join(timeout ...time.Duration) *Push {
 	}
 
 	result := <-response
-	return result.(*Push)
+	return result.(*PushV2)
 }
 
 // Leave leaves the channel
-func (ch *Channel) Leave(timeout ...time.Duration) *Push {
+func (ch *ChannelV2) Leave(timeout ...time.Duration) *PushV2 {
 	var leaveTimeout time.Duration = ch.timeout
 	if len(timeout) > 0 {
 		leaveTimeout = timeout[0]
@@ -223,11 +217,11 @@ func (ch *Channel) Leave(timeout ...time.Duration) *Push {
 	}
 
 	result := <-response
-	return result.(*Push)
+	return result.(*PushV2)
 }
 
 // Push sends an event to the channel
-func (ch *Channel) Push(event string, payload interface{}, timeout ...time.Duration) *Push {
+func (ch *ChannelV2) Push(event string, payload interface{}, timeout ...time.Duration) *PushV2 {
 	var pushTimeout time.Duration = ch.timeout
 	if len(timeout) > 0 {
 		pushTimeout = timeout[0]
@@ -249,11 +243,11 @@ func (ch *Channel) Push(event string, payload interface{}, timeout ...time.Durat
 	}
 
 	result := <-response
-	return result.(*Push)
+	return result.(*PushV2)
 }
 
 // On registers an event handler
-func (ch *Channel) On(event string, callback EventCallback) int {
+func (ch *ChannelV2) On(event string, callback EventCallback) int {
 	response := make(chan interface{}, 1)
 	ch.commands <- ChannelCommand{
 		Type: "on",
@@ -269,7 +263,7 @@ func (ch *Channel) On(event string, callback EventCallback) int {
 }
 
 // Off removes event handlers
-func (ch *Channel) Off(event string, ref ...int) {
+func (ch *ChannelV2) Off(event string, ref ...int) {
 	data := map[string]interface{}{
 		"event": event,
 	}
@@ -284,7 +278,7 @@ func (ch *Channel) Off(event string, ref ...int) {
 }
 
 // State query methods
-func (ch *Channel) GetState() ChannelState {
+func (ch *ChannelV2) GetState() ChannelState {
 	response := make(chan interface{}, 1)
 	ch.commands <- ChannelCommand{
 		Type:     "get_state",
@@ -293,7 +287,7 @@ func (ch *Channel) GetState() ChannelState {
 	return (<-response).(ChannelState)
 }
 
-func (ch *Channel) IsJoined() bool {
+func (ch *ChannelV2) IsJoined() bool {
 	response := make(chan interface{}, 1)
 	ch.commands <- ChannelCommand{
 		Type:     "is_joined",
@@ -302,7 +296,7 @@ func (ch *Channel) IsJoined() bool {
 	return (<-response).(bool)
 }
 
-func (ch *Channel) IsJoining() bool {
+func (ch *ChannelV2) IsJoining() bool {
 	response := make(chan interface{}, 1)
 	ch.commands <- ChannelCommand{
 		Type:     "is_joining",
@@ -311,7 +305,7 @@ func (ch *Channel) IsJoining() bool {
 	return (<-response).(bool)
 }
 
-func (ch *Channel) IsLeaving() bool {
+func (ch *ChannelV2) IsLeaving() bool {
 	response := make(chan interface{}, 1)
 	ch.commands <- ChannelCommand{
 		Type:     "is_leaving",
@@ -320,7 +314,7 @@ func (ch *Channel) IsLeaving() bool {
 	return (<-response).(bool)
 }
 
-func (ch *Channel) IsClosed() bool {
+func (ch *ChannelV2) IsClosed() bool {
 	response := make(chan interface{}, 1)
 	ch.commands <- ChannelCommand{
 		Type:     "is_closed",
@@ -329,7 +323,7 @@ func (ch *Channel) IsClosed() bool {
 	return (<-response).(bool)
 }
 
-func (ch *Channel) IsErrored() bool {
+func (ch *ChannelV2) IsErrored() bool {
 	response := make(chan interface{}, 1)
 	ch.commands <- ChannelCommand{
 		Type:     "is_errored",
@@ -338,11 +332,11 @@ func (ch *Channel) IsErrored() bool {
 	return (<-response).(bool)
 }
 
-func (ch *Channel) Topic() string {
+func (ch *ChannelV2) Topic() string {
 	return ch.topic
 }
 
-func (ch *Channel) JoinRef() string {
+func (ch *ChannelV2) JoinRef() string {
 	response := make(chan interface{}, 1)
 	ch.commands <- ChannelCommand{
 		Type:     "get_join_ref",
@@ -352,7 +346,7 @@ func (ch *Channel) JoinRef() string {
 }
 
 // HandleMessage is called by the socket to deliver messages to this channel
-func (ch *Channel) HandleMessage(msg *Message) {
+func (ch *ChannelV2) HandleMessage(msg *Message) {
 	select {
 	case ch.messages <- msg:
 	case <-ch.ctx.Done():
@@ -361,14 +355,14 @@ func (ch *Channel) HandleMessage(msg *Message) {
 
 // Private methods (only called by channel manager goroutine)
 
-func (ch *Channel) setupBuiltinHandlers() {
+func (ch *ChannelV2) setupBuiltinHandlers() {
 	// Add built-in Phoenix event handlers during construction
 	ch.bindingRef++
 	ch.bindings = append(ch.bindings, EventBinding{
 		event: "phx_reply",
 		ref:   ch.bindingRef,
 		callback: func(payload interface{}) {
-			// Handle reply - this will be implemented in Push
+			// Handle reply - this will be implemented in PushV2
 		},
 	})
 
@@ -397,7 +391,7 @@ func (ch *Channel) setupBuiltinHandlers() {
 	})
 }
 
-func (ch *Channel) doJoin(data interface{}) *Push {
+func (ch *ChannelV2) doJoin(data interface{}) *PushV2 {
 	params := data.(map[string]interface{})
 	timeout := params["timeout"].(time.Duration)
 
@@ -410,7 +404,7 @@ func (ch *Channel) doJoin(data interface{}) *Push {
 	ch.joinRef = ch.socket.MakeRef()
 
 	// Create join push
-	joinPush := NewPush(ch, "phx_join", func() interface{} {
+	joinPush := NewPushV2(ch, "phx_join", func() interface{} {
 		return ch.params
 	}, timeout)
 
@@ -434,13 +428,13 @@ func (ch *Channel) doJoin(data interface{}) *Push {
 	return joinPush
 }
 
-func (ch *Channel) doLeave(data interface{}) *Push {
+func (ch *ChannelV2) doLeave(data interface{}) *PushV2 {
 	params := data.(map[string]interface{})
 	timeout := params["timeout"].(time.Duration)
 
 	ch.state = ChannelLeaving
 
-	leavePush := NewPush(ch, "phx_leave", func() interface{} {
+	leavePush := NewPushV2(ch, "phx_leave", func() interface{} {
 		return map[string]interface{}{}
 	}, timeout)
 
@@ -455,7 +449,7 @@ func (ch *Channel) doLeave(data interface{}) *Push {
 	return leavePush
 }
 
-func (ch *Channel) doPush(data interface{}) *Push {
+func (ch *ChannelV2) doPush(data interface{}) *PushV2 {
 	params := data.(map[string]interface{})
 	event := params["event"].(string)
 	payload := params["payload"]
@@ -465,7 +459,7 @@ func (ch *Channel) doPush(data interface{}) *Push {
 		panic("tried to push before joining. Use channel.Join() before pushing events")
 	}
 
-	push := NewPush(ch, event, func() interface{} {
+	push := NewPushV2(ch, event, func() interface{} {
 		return payload
 	}, timeout)
 
@@ -482,7 +476,7 @@ func (ch *Channel) doPush(data interface{}) *Push {
 	return push
 }
 
-func (ch *Channel) doOn(data interface{}) int {
+func (ch *ChannelV2) doOn(data interface{}) int {
 	params := data.(map[string]interface{})
 	event := params["event"].(string)
 	callback := params["callback"].(EventCallback)
@@ -499,7 +493,7 @@ func (ch *Channel) doOn(data interface{}) int {
 	return ref
 }
 
-func (ch *Channel) doOff(data interface{}) {
+func (ch *ChannelV2) doOff(data interface{}) {
 	params := data.(map[string]interface{})
 	event := params["event"].(string)
 
@@ -525,12 +519,12 @@ func (ch *Channel) doOff(data interface{}) {
 	}
 }
 
-func (ch *Channel) canPush() bool {
+func (ch *ChannelV2) canPush() bool {
 	// Channel can push if it's joined and socket is connected
 	return ch.state == ChannelJoined && ch.socket.IsConnected()
 }
 
-func (ch *Channel) handleMessage(msg *Message) {
+func (ch *ChannelV2) handleMessage(msg *Message) {
 	// Check if message belongs to this channel
 	if !ch.isMember(msg) {
 		return
@@ -540,7 +534,7 @@ func (ch *Channel) handleMessage(msg *Message) {
 	ch.trigger(msg.Event, msg.Payload, msg.Ref, msg.JoinRef)
 }
 
-func (ch *Channel) isMember(msg *Message) bool {
+func (ch *ChannelV2) isMember(msg *Message) bool {
 	if ch.topic != msg.Topic {
 		return false
 	}
@@ -553,7 +547,7 @@ func (ch *Channel) isMember(msg *Message) bool {
 	return true
 }
 
-func (ch *Channel) trigger(event string, payload interface{}, ref string, joinRef string) {
+func (ch *ChannelV2) trigger(event string, payload interface{}, ref string, joinRef string) {
 	// Find matching event handlers
 	var matchingBindings []EventBinding
 	for _, binding := range ch.bindings {
@@ -573,7 +567,7 @@ func (ch *Channel) trigger(event string, payload interface{}, ref string, joinRe
 	}
 }
 
-func (ch *Channel) handleReply(payload interface{}, ref string) {
+func (ch *ChannelV2) handleReply(payload interface{}, ref string) {
 	if ref == "" {
 		return
 	}

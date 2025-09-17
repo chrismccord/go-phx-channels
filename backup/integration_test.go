@@ -1,7 +1,6 @@
 package gophxchannels_test
 
 import (
-	"encoding/base64"
 	"log"
 	"os"
 	"sync"
@@ -284,11 +283,11 @@ func TestIntegrationBinaryMessages(t *testing.T) {
 	require.True(t, joinSucceeded, "Must join channel before testing binary")
 	mu.Unlock()
 
-	// Test binary echo - with V1 JSON serializer, we encode as base64
+	// Test binary echo
 	testData := []byte{0x01, 0x02, 0x03, 0x04, 0x05}
 	var echoResponse interface{}
 
-	push := channel.Push("binary_echo", testData)
+	push := channel.Push("binary_echo", phx.NewBinaryPayload(testData))
 	push.Receive("ok", func(resp interface{}) {
 		mu.Lock()
 		echoResponse = resp
@@ -302,18 +301,11 @@ func TestIntegrationBinaryMessages(t *testing.T) {
 	mu.Lock()
 	assert.NotNil(t, echoResponse, "Should receive binary echo response")
 
-	// Verify the echoed data matches
+	// Check if response contains binary data
 	if respMap, ok := echoResponse.(map[string]interface{}); ok {
-		if responseStr, ok := respMap["response"].(string); ok {
-			// Server should return base64 encoded data
-			decodedData, err := base64.StdEncoding.DecodeString(responseStr)
-			assert.NoError(t, err, "Response should be valid base64")
-			assert.Equal(t, testData, decodedData, "Echoed data should match original")
-		} else {
-			t.Errorf("Expected string response, got %T: %v", respMap["response"], respMap["response"])
+		if binaryResp, ok := respMap["response"].(phx.BinaryPayload); ok {
+			assert.Equal(t, testData, binaryResp.Data, "Echoed binary data should match")
 		}
-	} else {
-		t.Errorf("Expected map response, got %T: %v", echoResponse, echoResponse)
 	}
 	mu.Unlock()
 
@@ -323,11 +315,9 @@ func TestIntegrationBinaryMessages(t *testing.T) {
 
 	channel.On("binary_data", func(payload interface{}) {
 		mu.Lock()
-		binaryEventReceived = true
-		if base64Str, ok := payload.(string); ok {
-			if decoded, err := base64.StdEncoding.DecodeString(base64Str); err == nil {
-				binaryEventData = decoded
-			}
+		if binaryPayload, ok := payload.(phx.BinaryPayload); ok {
+			binaryEventReceived = true
+			binaryEventData = binaryPayload.Data
 		}
 		mu.Unlock()
 	})

@@ -451,35 +451,61 @@ end
 
 ## Testing
 
-### Unit Tests
+This project includes comprehensive unit and integration tests.
+
+### Unit Tests Only
+
+Run unit tests without requiring a Phoenix server:
 
 ```bash
-go test -short ./...
+go test -short
 ```
 
 ### Integration Tests
 
-Start a Phoenix server first, then:
+Integration tests require a running Phoenix server on `localhost:4000`. The project includes a complete Phoenix test server for this purpose.
+
+#### Quick Start - All Tests
+
+1. **Start the test server** (in one terminal):
+   ```bash
+   cd test_server
+   mix deps.get    # Install dependencies (first time only)
+   mix phx.server  # Start server on localhost:4000
+   ```
+
+2. **Run all tests** (in another terminal):
+   ```bash
+   go test -v
+   ```
+
+#### Integration Tests Only
+
+Run only the integration tests:
 
 ```bash
-go test ./...
+go test -v -run TestIntegration
 ```
 
-### Using the Test Server
-
-This repository includes a Phoenix test server:
+#### Individual Test Categories
 
 ```bash
-cd test_server
-mix deps.get
-mix phx.server
+# Test specific functionality
+go test -v -run TestIntegrationTimeout
+go test -v -run TestIntegrationBinaryMessages
+go test -v -run TestIntegrationReconnection
 ```
 
-Then run integration tests:
+### Test Coverage
 
-```bash
-go test ./... -run Integration
-```
+The test suite covers:
+- Socket connection/disconnection
+- Channel join/leave operations
+- Push/receive message patterns
+- Binary message handling (base64 encoded over JSON)
+- Automatic reconnection
+- Error handling and timeouts
+- Multi-client broadcast scenarios
 
 ## Development
 

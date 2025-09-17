@@ -15,9 +15,14 @@ defmodule PhxTestServerWeb.Endpoint do
     websocket: [connect_info: [session: @session_options]],
     longpoll: [connect_info: [session: @session_options]]
 
-  # WebSocket for Go client testing
+  # WebSocket for Go client testing (JSON)
   socket "/socket", PhxTestServerWeb.UserSocket,
     websocket: true,
+    longpoll: false
+
+  # WebSocket for Go client testing (Binary)
+  socket "/binary_socket", PhxTestServerWeb.BinarySocket,
+    websocket: [serializer: [{Phoenix.Socket.V1.BinarySerializer, "~> 1.0.0"}]],
     longpoll: false
 
   # Serve at "/" the static files from "priv/static" directory.

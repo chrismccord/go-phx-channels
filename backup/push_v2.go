@@ -12,9 +12,9 @@ type ReceiveHook struct {
 	callback func(interface{})
 }
 
-// Push represents a push operation using goroutines and channels
-type Push struct {
-	channel      *Channel
+// PushV2 represents a push operation using goroutines and channels
+type PushV2 struct {
+	channel      *ChannelV2
 	event        string
 	payload      func() interface{}
 	timeout      time.Duration
@@ -36,11 +36,11 @@ type Push struct {
 	wg     sync.WaitGroup
 }
 
-// NewPush creates a new lock-free push instance
-func NewPush(channel *Channel, event string, payload func() interface{}, timeout time.Duration) *Push {
+// NewPushV2 creates a new lock-free push instance
+func NewPushV2(channel *ChannelV2, event string, payload func() interface{}, timeout time.Duration) *PushV2 {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	p := &Push{
+	p := &PushV2{
 		channel:  channel,
 		event:    event,
 		payload:  payload,
@@ -59,7 +59,7 @@ func NewPush(channel *Channel, event string, payload func() interface{}, timeout
 }
 
 // pushManager is the main goroutine that owns push state
-func (p *Push) pushManager() {
+func (p *PushV2) pushManager() {
 	defer p.wg.Done()
 
 	var timeoutTimer *time.Timer
@@ -73,7 +73,7 @@ func (p *Push) pushManager() {
 			return
 
 		case cmd := <-p.commands:
-			p.handlePushCommand(cmd, &timeoutTimer)
+			p.handlePushCommand(cmd)
 
 		case <-func() <-chan time.Time {
 			if timeoutTimer != nil {
@@ -82,23 +82,22 @@ func (p *Push) pushManager() {
 			return nil
 		}():
 			// Timeout occurred
-			timeoutTimer = nil
 			p.triggerTimeout()
 		}
 	}
 }
 
-func (p *Push) handlePushCommand(cmd ChannelCommand, timeoutTimer **time.Timer) {
+func (p *PushV2) handlePushCommand(cmd ChannelCommand) {
 	switch cmd.Type {
 	case "send":
-		p.doSend(timeoutTimer)
+		p.doSend()
 		if cmd.Response != nil {
 			cmd.Response <- nil
 		}
 
 	case "resend":
 		timeout := cmd.Data.(time.Duration)
-		p.doResend(timeout, timeoutTimer)
+		p.doResend(timeout)
 		if cmd.Response != nil {
 			cmd.Response <- nil
 		}
@@ -115,20 +114,12 @@ func (p *Push) handlePushCommand(cmd ChannelCommand, timeoutTimer **time.Timer) 
 
 	case "cancel_timeout":
 		p.doCancelTimeout()
-		if *timeoutTimer != nil {
-			(*timeoutTimer).Stop()
-			*timeoutTimer = nil
-		}
 		if cmd.Response != nil {
 			cmd.Response <- nil
 		}
 
 	case "start_timeout":
 		p.doStartTimeout()
-		if *timeoutTimer != nil {
-			(*timeoutTimer).Stop()
-		}
-		*timeoutTimer = time.NewTimer(p.timeout)
 		if cmd.Response != nil {
 			cmd.Response <- nil
 		}
@@ -163,14 +154,14 @@ func (p *Push) handlePushCommand(cmd ChannelCommand, timeoutTimer **time.Timer) 
 // Public API methods
 
 // Send sends the push message
-func (p *Push) Send() {
+func (p *PushV2) Send() {
 	p.commands <- ChannelCommand{
 		Type: "send",
 	}
 }
 
 // Resend resets and resends the push with a new timeout
-func (p *Push) Resend(timeout time.Duration) {
+func (p *PushV2) Resend(timeout time.Duration) {
 	p.commands <- ChannelCommand{
 		Type: "resend",
 		Data: timeout,
@@ -178,7 +169,7 @@ func (p *Push) Resend(timeout time.Duration) {
 }
 
 // Receive registers a callback for a specific response status
-func (p *Push) Receive(status string, callback func(interface{})) *Push {
+func (p *PushV2) Receive(status string, callback func(interface{})) *PushV2 {
 	response := make(chan interface{}, 1)
 	p.commands <- ChannelCommand{
 		Type: "receive",
@@ -190,25 +181,25 @@ func (p *Push) Receive(status string, callback func(interface{})) *Push {
 	}
 
 	result := <-response
-	return result.(*Push)
+	return result.(*PushV2)
 }
 
 // CancelTimeout cancels the timeout timer
-func (p *Push) CancelTimeout() {
+func (p *PushV2) CancelTimeout() {
 	p.commands <- ChannelCommand{
 		Type: "cancel_timeout",
 	}
 }
 
 // StartTimeout starts the timeout timer
-func (p *Push) StartTimeout() {
+func (p *PushV2) StartTimeout() {
 	p.commands <- ChannelCommand{
 		Type: "start_timeout",
 	}
 }
 
 // IsSent returns true if the push has been sent
-func (p *Push) IsSent() bool {
+func (p *PushV2) IsSent() bool {
 	response := make(chan interface{}, 1)
 	p.commands <- ChannelCommand{
 		Type:     "is_sent",
@@ -218,7 +209,7 @@ func (p *Push) IsSent() bool {
 }
 
 // GetResponse returns the received response if available
-func (p *Push) GetResponse() *ReplyPayload {
+func (p *PushV2) GetResponse() *ReplyPayload {
 	response := make(chan interface{}, 1)
 	p.commands <- ChannelCommand{
 		Type:     "get_response",
@@ -232,7 +223,7 @@ func (p *Push) GetResponse() *ReplyPayload {
 }
 
 // HasReceived returns true if a response with the given status was received
-func (p *Push) HasReceived(status string) bool {
+func (p *PushV2) HasReceived(status string) bool {
 	response := make(chan interface{}, 1)
 	p.commands <- ChannelCommand{
 		Type:     "has_received",
@@ -243,7 +234,7 @@ func (p *Push) HasReceived(status string) bool {
 }
 
 // GetRef returns the push reference
-func (p *Push) GetRef() string {
+func (p *PushV2) GetRef() string {
 	response := make(chan interface{}, 1)
 	p.commands <- ChannelCommand{
 		Type:     "get_ref",
@@ -254,18 +245,13 @@ func (p *Push) GetRef() string {
 
 // Private methods (only called by push manager goroutine)
 
-func (p *Push) doSend(timeoutTimer **time.Timer) {
+func (p *PushV2) doSend() {
 	if p.hasReceived("timeout") {
 		return
 	}
 
 	p.doStartTimeout()
-
-	// Start the timeout timer
-	if *timeoutTimer != nil {
-		(*timeoutTimer).Stop()
-	}
-	*timeoutTimer = time.NewTimer(p.timeout)
+	p.sent = true
 
 	msg := &Message{
 		Topic:   p.channel.topic,
@@ -278,13 +264,13 @@ func (p *Push) doSend(timeoutTimer **time.Timer) {
 	p.channel.socket.Push(msg)
 }
 
-func (p *Push) doResend(timeout time.Duration, timeoutTimer **time.Timer) {
+func (p *PushV2) doResend(timeout time.Duration) {
 	p.timeout = timeout
 	p.doReset()
-	p.doSend(timeoutTimer)
+	p.doSend()
 }
 
-func (p *Push) doReceive(status string, callback func(interface{})) {
+func (p *PushV2) doReceive(status string, callback func(interface{})) {
 	// If we already received this status, call the callback immediately
 	if p.hasReceived(status) {
 		go callback(p.receivedResp.Response)
@@ -297,7 +283,7 @@ func (p *Push) doReceive(status string, callback func(interface{})) {
 	})
 }
 
-func (p *Push) doStartTimeout() {
+func (p *PushV2) doStartTimeout() {
 	p.sent = true
 	p.ref = p.channel.socket.MakeRef()
 	p.refEvent = p.replyEventName(p.ref)
@@ -316,16 +302,18 @@ func (p *Push) doStartTimeout() {
 			Data: replyPayload,
 		}
 	})
+
+	// Note: Timeout timer will be started by the pushManager goroutine
 }
 
-func (p *Push) doCancelTimeout() {
+func (p *PushV2) doCancelTimeout() {
 	if p.refEvent != "" && p.refEventRef != 0 {
 		p.channel.Off(p.refEvent, p.refEventRef)
 		p.refEventRef = 0
 	}
 }
 
-func (p *Push) doReset() {
+func (p *PushV2) doReset() {
 	p.doCancelTimeout()
 	p.ref = ""
 	p.refEvent = ""
@@ -333,11 +321,11 @@ func (p *Push) doReset() {
 	p.sent = false
 }
 
-func (p *Push) hasReceived(status string) bool {
+func (p *PushV2) hasReceived(status string) bool {
 	return p.receivedResp != nil && p.receivedResp.Status == status
 }
 
-func (p *Push) handleReplyReceived(replyPayload *ReplyPayload) {
+func (p *PushV2) handleReplyReceived(replyPayload *ReplyPayload) {
 	p.doCancelTimeout()
 	p.receivedResp = replyPayload
 
@@ -349,7 +337,7 @@ func (p *Push) handleReplyReceived(replyPayload *ReplyPayload) {
 	}
 }
 
-func (p *Push) triggerTimeout() {
+func (p *PushV2) triggerTimeout() {
 	// Create timeout response
 	timeoutPayload := &ReplyPayload{
 		Status:   "timeout",
@@ -359,12 +347,12 @@ func (p *Push) triggerTimeout() {
 	p.handleReplyReceived(timeoutPayload)
 }
 
-func (p *Push) replyEventName(ref string) string {
+func (p *PushV2) replyEventName(ref string) string {
 	return "chan_reply_" + ref
 }
 
 // trigger triggers a response status (for testing and internal use)
-func (p *Push) trigger(status string, response interface{}) {
+func (p *PushV2) trigger(status string, response interface{}) {
 	payload := &ReplyPayload{
 		Status:   status,
 		Response: response,

@@ -22,7 +22,7 @@ func TestNewChannel(t *testing.T) {
 	assert.False(t, channel.joinedOnce)
 	assert.NotNil(t, channel.joinPush)
 	assert.NotNil(t, channel.rejoinTimer)
-	assert.Empty(t, channel.bindings)
+	assert.Len(t, channel.bindings, 3) // phx_reply, phx_close, phx_error handlers
 	assert.Empty(t, channel.pushBuffer)
 }
 
@@ -111,10 +111,10 @@ func TestChannelJoin(t *testing.T) {
 	socket := NewSocket("ws://localhost:4000/socket/websocket", nil)
 	channel := newChannel("room:test", nil, socket)
 
-	// Mock socket as connected
+	// Mock socket as connected but without actual connection
 	socket.mu.Lock()
-	socket.connected = true
-	socket.state = StateOpen
+	socket.connected = false // Keep as false to avoid trying to send over nil connection
+	socket.state = StateClosed
 	socket.mu.Unlock()
 
 	push := channel.Join()

@@ -42,15 +42,29 @@ defmodule PhxTestServerWeb.RoomChannel do
   end
 
   @impl true
+  def handle_in("binary_echo", base64_data, socket) when is_binary(base64_data) do
+    # Decode base64 data from JSON serializer
+    case Base.decode64(base64_data) do
+      {:ok, data} ->
+        encoded_response = Base.encode64(data)
+        {:reply, {:ok, %{response: encoded_response}}, socket}
+      :error ->
+        {:reply, {:error, %{reason: "invalid_base64"}}, socket}
+    end
+  end
+
+  @impl true
   def handle_in("binary_echo", {:binary, data}, socket) do
-    # Echo the binary data back
+    # Echo the binary data back (for binary serializer)
     {:reply, {:ok, {:binary, data}}, socket}
   end
 
   @impl true
   def handle_in("push_binary", _payload, socket) do
-    # Push some binary data
-    push(socket, "binary_data", {:binary, <<1, 2, 3, 4>>})
+    # Push some binary data - base64 encoded for JSON serializer
+    binary_data = <<1, 2, 3, 4>>
+    encoded_data = Base.encode64(binary_data)
+    push(socket, "binary_data", encoded_data)
     {:reply, {:ok, %{binary_pushed: true}}, socket}
   end
 end

@@ -31,7 +31,6 @@ type BinaryPayload struct {
 	Data []byte
 }
 
-
 // IsBinary checks if the message payload is binary
 func (m *Message) IsBinary() bool {
 	_, ok := m.Payload.(BinaryPayload)
@@ -67,80 +66,19 @@ func (s *Serializer) Decode(data []byte) (*Message, error) {
 	return s.jsonDecode(data)
 }
 
-// jsonEncode encodes a message as JSON using Phoenix V1 format (map)
+// jsonEncode encodes a message as JSON
 func (s *Serializer) jsonEncode(msg *Message) ([]byte, error) {
-	payload := map[string]interface{}{
-		"join_ref": msg.JoinRef,
-		"ref":      msg.Ref,
-		"topic":    msg.Topic,
-		"event":    msg.Event,
-		"payload":  msg.Payload,
-	}
+	payload := []interface{}{msg.JoinRef, msg.Ref, msg.Topic, msg.Event, msg.Payload}
 	return json.Marshal(payload)
 }
 
-// jsonDecode decodes a JSON message (handles both V1 map format and V2 array format)
+// jsonDecode decodes a JSON message
 func (s *Serializer) jsonDecode(data []byte) (*Message, error) {
-	// Try to decode as map first (V1 format)
-	var mapPayload map[string]interface{}
-	if err := json.Unmarshal(data, &mapPayload); err == nil {
-		return s.decodeMapFormat(mapPayload)
-	}
-
-	// Fall back to array format (V2 format)
-	var arrayPayload []interface{}
-	if err := json.Unmarshal(data, &arrayPayload); err != nil {
+	var payload []interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
 		return nil, fmt.Errorf("failed to decode JSON: %w", err)
 	}
 
-	return s.decodeArrayFormat(arrayPayload)
-}
-
-// decodeMapFormat decodes Phoenix V1 map format
-func (s *Serializer) decodeMapFormat(payload map[string]interface{}) (*Message, error) {
-	msg := &Message{}
-
-	if joinRef, ok := payload["join_ref"]; ok && joinRef != nil {
-		if str, ok := joinRef.(string); ok {
-			msg.JoinRef = str
-		}
-	}
-
-	if ref, ok := payload["ref"]; ok && ref != nil {
-		if str, ok := ref.(string); ok {
-			msg.Ref = str
-		}
-	}
-
-	if topic, ok := payload["topic"]; ok {
-		if str, ok := topic.(string); ok {
-			msg.Topic = str
-		} else {
-			return nil, fmt.Errorf("invalid topic type")
-		}
-	} else {
-		return nil, fmt.Errorf("missing topic field")
-	}
-
-	if event, ok := payload["event"]; ok {
-		if str, ok := event.(string); ok {
-			msg.Event = str
-		} else {
-			return nil, fmt.Errorf("invalid event type")
-		}
-	} else {
-		return nil, fmt.Errorf("missing event field")
-	}
-
-	if payloadData, ok := payload["payload"]; ok {
-		msg.Payload = payloadData
-	}
-
-	return msg, nil
-}
-
-// decodeArrayFormat decodes Phoenix V2 array format
-func (s *Serializer) decodeArrayFormat(payload []interface{}) (*Message, error) {
 	if len(payload) != 5 {
 		return nil, fmt.Errorf("invalid message format: expected 5 elements, got %d", len(payload))
 	}

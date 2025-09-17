@@ -10,75 +10,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// SocketOptions configures the socket behavior
-type SocketOptions struct {
-	// Timeout for push operations (default: 10 seconds)
-	Timeout time.Duration
-
-	// HeartbeatInterval for sending heartbeats (default: 30 seconds)
-	HeartbeatInterval time.Duration
-
-	// ReconnectAfterMs function that returns the reconnect interval
-	ReconnectAfterMs func(tries int) time.Duration
-
-	// Logger for debug output
-	Logger *log.Logger
-
-	// Parameters to send on connect
-	Params map[string]interface{}
-
-	// VSN is the protocol version (default: "2.0.0")
-	VSN string
-
-	// AuthToken for authentication
-	AuthToken string
-
-	// ReconnectEnabled controls automatic reconnection (default: true)
-	ReconnectEnabled bool
-
-	// MaxReconnectAttempts limits reconnection attempts (0 = unlimited)
-	MaxReconnectAttempts int
-}
-
-// DefaultReconnectAfterMs returns the default reconnect backoff function
-func DefaultReconnectAfterMs(tries int) time.Duration {
-	intervals := []time.Duration{
-		10 * time.Millisecond,
-		50 * time.Millisecond,
-		100 * time.Millisecond,
-		150 * time.Millisecond,
-		200 * time.Millisecond,
-		250 * time.Millisecond,
-		500 * time.Millisecond,
-		1 * time.Second,
-		2 * time.Second,
-	}
-
-	if tries-1 < len(intervals) {
-		return intervals[tries-1]
-	}
-	return 5 * time.Second
-}
-
-// setDefaultOptions sets default values for unspecified options
-func setDefaultOptions(options *SocketOptions) {
-	if options.Timeout == 0 {
-		options.Timeout = 10 * time.Second
-	}
-	if options.HeartbeatInterval == 0 {
-		options.HeartbeatInterval = 30 * time.Second
-	}
-	if options.ReconnectAfterMs == nil {
-		options.ReconnectAfterMs = DefaultReconnectAfterMs
-	}
-	if options.VSN == "" {
-		options.VSN = "2.0.0"
-	}
-	if options.Params == nil {
-		options.Params = make(map[string]interface{})
-	}
-}
-
 // SocketCommand represents commands sent to the socket manager
 type SocketCommand struct {
 	Type     string
@@ -97,7 +28,7 @@ const (
 )
 
 // Socket represents a Phoenix WebSocket connection using goroutines and channels
-type Socket struct {
+type SocketV2 struct {
 	endpoint string
 	options  *SocketOptions
 
@@ -111,7 +42,7 @@ type Socket struct {
 	conn         *websocket.Conn
 	state        SocketState
 	connected    bool
-	channels     map[string]*Channel
+	channels     map[string]*ChannelV2
 	ref          int64
 	sendBuffer   []func()
 
@@ -124,8 +55,8 @@ type Socket struct {
 	wg           sync.WaitGroup
 }
 
-// NewSocket creates a new lock-free socket using goroutines
-func NewSocket(endpoint string, options *SocketOptions) *Socket {
+// NewSocketV2 creates a new lock-free socket using goroutines
+func NewSocketV2(endpoint string, options *SocketOptions) *SocketV2 {
 	if options == nil {
 		options = &SocketOptions{}
 	}
@@ -133,14 +64,14 @@ func NewSocket(endpoint string, options *SocketOptions) *Socket {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	s := &Socket{
+	s := &SocketV2{
 		endpoint:   endpoint,
 		options:    options,
 		commands:   make(chan SocketCommand, 100),
 		outbound:   make(chan *Message, 100),
 		inbound:    make(chan *Message, 100),
 		shutdown:   make(chan struct{}),
-		channels:   make(map[string]*Channel),
+		channels:   make(map[string]*ChannelV2),
 		state:      StateClosed,
 		serializer: NewSerializer(),
 		ctx:        ctx,
@@ -159,7 +90,7 @@ func NewSocket(endpoint string, options *SocketOptions) *Socket {
 }
 
 // socketManager is the main goroutine that owns socket state
-func (s *Socket) socketManager() {
+func (s *SocketV2) socketManager() {
 	defer s.wg.Done()
 
 	var heartbeatTicker *time.Ticker
@@ -212,7 +143,7 @@ func (s *Socket) socketManager() {
 }
 
 // messageHandler processes incoming messages
-func (s *Socket) messageHandler() {
+func (s *SocketV2) messageHandler() {
 	defer s.wg.Done()
 
 	for {
@@ -227,7 +158,7 @@ func (s *Socket) messageHandler() {
 }
 
 // handleCommand processes commands from the public API
-func (s *Socket) handleCommand(cmd SocketCommand) {
+func (s *SocketV2) handleCommand(cmd SocketCommand) {
 	switch cmd.Type {
 	case "connect":
 		err := s.doConnect()
@@ -274,7 +205,7 @@ func (s *Socket) handleCommand(cmd SocketCommand) {
 		}
 
 		// Create new channel
-		ch := NewChannel(topic, params, s)
+		ch := NewChannelV2(topic, params, s)
 		s.channels[topic] = ch
 		if cmd.Response != nil {
 			cmd.Response <- ch
@@ -292,7 +223,7 @@ func (s *Socket) handleCommand(cmd SocketCommand) {
 // Public API methods that send commands to the socket manager
 
 // Connect connects to the WebSocket server
-func (s *Socket) Connect() error {
+func (s *SocketV2) Connect() error {
 	response := make(chan interface{}, 1)
 	s.commands <- SocketCommand{
 		Type:     "connect",
@@ -307,93 +238,42 @@ func (s *Socket) Connect() error {
 }
 
 // Disconnect closes the WebSocket connection
-func (s *Socket) Disconnect() {
-	// Cancel context first to signal all goroutines to stop
+func (s *SocketV2) Disconnect() {
+	response := make(chan interface{}, 1)
+	s.commands <- SocketCommand{
+		Type:     "disconnect",
+		Response: response,
+	}
+	<-response
+
+	// Shutdown everything
+	close(s.shutdown)
 	s.cancel()
-
-	// Send disconnect command with a very short timeout
-	select {
-	case s.commands <- SocketCommand{Type: "disconnect"}:
-		// Command sent successfully
-	case <-time.After(10 * time.Millisecond):
-		// Command couldn't be sent, socket manager probably already exiting
-	}
-
-	// Close shutdown channel to signal all goroutines
-	select {
-	case <-s.shutdown:
-		// Already closed
-	default:
-		close(s.shutdown)
-	}
-
-	// Give goroutines a chance to exit gracefully, but don't wait forever
-	done := make(chan struct{})
-	go func() {
-		s.wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		// All goroutines exited cleanly
-		if s.options.Logger != nil {
-			s.options.Logger.Printf("Disconnected cleanly from %s", s.endpoint)
-		}
-	case <-time.After(500 * time.Millisecond):
-		// Timeout - just continue, the test doesn't need to wait for all cleanup
-		if s.options.Logger != nil {
-			s.options.Logger.Printf("Disconnect from %s (some goroutines may still be running)", s.endpoint)
-		}
-	}
+	s.wg.Wait()
 }
 
 // IsConnected returns true if connected to the server
-func (s *Socket) IsConnected() bool {
+func (s *SocketV2) IsConnected() bool {
 	response := make(chan interface{}, 1)
-	select {
-	case s.commands <- SocketCommand{
+	s.commands <- SocketCommand{
 		Type:     "is_connected",
 		Response: response,
-	}:
-		// Command sent successfully
-		select {
-		case result := <-response:
-			return result.(bool)
-		case <-time.After(100 * time.Millisecond):
-			// Timeout - assume disconnected if we can't get status
-			return false
-		}
-	case <-time.After(10 * time.Millisecond):
-		// Can't send command - assume disconnected
-		return false
 	}
+	return (<-response).(bool)
 }
 
 // ConnectionState returns the current connection state
-func (s *Socket) ConnectionState() SocketState {
+func (s *SocketV2) ConnectionState() SocketState {
 	response := make(chan interface{}, 1)
-	select {
-	case s.commands <- SocketCommand{
+	s.commands <- SocketCommand{
 		Type:     "get_state",
 		Response: response,
-	}:
-		// Command sent successfully
-		select {
-		case result := <-response:
-			return result.(SocketState)
-		case <-time.After(100 * time.Millisecond):
-			// Timeout - assume closed if we can't get status
-			return StateClosed
-		}
-	case <-time.After(10 * time.Millisecond):
-		// Can't send command - assume closed
-		return StateClosed
 	}
+	return (<-response).(SocketState)
 }
 
 // MakeRef generates a unique reference
-func (s *Socket) MakeRef() string {
+func (s *SocketV2) MakeRef() string {
 	response := make(chan interface{}, 1)
 	s.commands <- SocketCommand{
 		Type:     "make_ref",
@@ -403,7 +283,7 @@ func (s *Socket) MakeRef() string {
 }
 
 // Channel creates or returns an existing channel
-func (s *Socket) Channel(topic string, params map[string]interface{}) *Channel {
+func (s *SocketV2) Channel(topic string, params map[string]interface{}) *ChannelV2 {
 	response := make(chan interface{}, 1)
 	s.commands <- SocketCommand{
 		Type: "create_channel",
@@ -413,40 +293,20 @@ func (s *Socket) Channel(topic string, params map[string]interface{}) *Channel {
 		},
 		Response: response,
 	}
-	return (<-response).(*Channel)
+	return (<-response).(*ChannelV2)
 }
 
 // Push sends a message through the socket
-func (s *Socket) Push(msg *Message) {
+func (s *SocketV2) Push(msg *Message) {
 	select {
 	case s.outbound <- msg:
 	case <-s.ctx.Done():
 	}
 }
 
-// OnOpen registers a callback for when the socket connects
-func (s *Socket) OnOpen(callback func()) {
-	// For now, just store the callback and call it when connecting
-	// This is a simple implementation for API compatibility
-	go func() {
-		for {
-			select {
-			case <-s.ctx.Done():
-				return
-			default:
-				if s.IsConnected() {
-					callback()
-					return
-				}
-				time.Sleep(100 * time.Millisecond)
-			}
-		}
-	}()
-}
-
 // Private methods (only called by socket manager goroutine)
 
-func (s *Socket) doConnect() error {
+func (s *SocketV2) doConnect() error {
 	if s.connected {
 		return nil
 	}
@@ -480,18 +340,13 @@ func (s *Socket) doConnect() error {
 	return nil
 }
 
-func (s *Socket) doDisconnect() {
+func (s *SocketV2) doDisconnect() {
 	if !s.connected {
 		return
 	}
 
 	s.state = StateClosing
 	s.connected = false
-
-	// Close all channels first
-	for _, ch := range s.channels {
-		ch.cancel() // Cancel the channel's context
-	}
 
 	if s.conn != nil {
 		s.conn.Close()
@@ -505,7 +360,7 @@ func (s *Socket) doDisconnect() {
 	}
 }
 
-func (s *Socket) handleOutboundMessage(msg *Message) {
+func (s *SocketV2) handleOutboundMessage(msg *Message) {
 	if s.connected && s.conn != nil {
 		s.sendMessage(msg)
 	} else {
@@ -516,7 +371,7 @@ func (s *Socket) handleOutboundMessage(msg *Message) {
 	}
 }
 
-func (s *Socket) sendMessage(msg *Message) {
+func (s *SocketV2) sendMessage(msg *Message) {
 	data, err := s.serializer.Encode(msg)
 	if err != nil {
 		if s.options.Logger != nil {
@@ -540,7 +395,7 @@ func (s *Socket) sendMessage(msg *Message) {
 	}
 }
 
-func (s *Socket) sendHeartbeat() {
+func (s *SocketV2) sendHeartbeat() {
 	heartbeat := &Message{
 		Topic:   "phoenix",
 		Event:   "heartbeat",
@@ -550,14 +405,14 @@ func (s *Socket) sendHeartbeat() {
 	s.handleOutboundMessage(heartbeat)
 }
 
-func (s *Socket) attemptReconnect() {
+func (s *SocketV2) attemptReconnect() {
 	if s.options.Logger != nil {
 		s.options.Logger.Printf("Attempting to reconnect...")
 	}
 	s.doConnect()
 }
 
-func (s *Socket) readMessages() {
+func (s *SocketV2) readMessages() {
 	defer s.wg.Done()
 
 	for {
@@ -565,7 +420,7 @@ func (s *Socket) readMessages() {
 			return
 		}
 
-		_, data, err := s.conn.ReadMessage()
+		messageType, data, err := s.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				if s.options.Logger != nil {
@@ -575,7 +430,7 @@ func (s *Socket) readMessages() {
 			return
 		}
 
-		msg, err := s.serializer.Decode(data)
+		msg, err := s.serializer.Decode(data, messageType == websocket.BinaryMessage)
 		if err != nil {
 			if s.options.Logger != nil {
 				s.options.Logger.Printf("Failed to decode message: %v", err)
@@ -591,7 +446,7 @@ func (s *Socket) readMessages() {
 	}
 }
 
-func (s *Socket) routeMessage(msg *Message) {
+func (s *SocketV2) routeMessage(msg *Message) {
 	// Route message to appropriate channel
 	if ch, exists := s.channels[msg.Topic]; exists {
 		ch.HandleMessage(msg)
