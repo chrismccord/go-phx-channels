@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -58,6 +59,13 @@ func DefaultReconnectAfterMs(tries int) time.Duration {
 		return intervals[tries-1]
 	}
 	return 5 * time.Second
+}
+
+// debugLog logs debug messages if PHX_DEBUG environment variable is set
+func debugLog(format string, args ...interface{}) {
+	if os.Getenv("PHX_DEBUG") != "" {
+		log.Printf("[PHX_DEBUG] "+format, args...)
+	}
 }
 
 // setDefaultOptions sets default values for unspecified options
@@ -217,10 +225,12 @@ func (s *Socket) socketManager() {
 			}
 			return nil
 		}():
+			debugLog("Reconnect timer fired, calling attemptReconnect")
 			s.attemptReconnect()
 
 		// Connection error from readMessages/writeMessages
 		case err := <-s.connectionError:
+			debugLog("Received connection error: %v", err)
 			if s.options.Logger != nil {
 				s.options.Logger.Printf("Connection error: %v", err)
 			}
@@ -232,8 +242,12 @@ func (s *Socket) socketManager() {
 				s.conn = nil
 			}
 			// Schedule reconnection if not manually disconnected
+			debugLog("Checking if should reconnect: isReconnecting=%v, ReconnectEnabled=%v", s.isReconnecting, *s.options.ReconnectEnabled)
 			if !s.isReconnecting {
+				debugLog("Calling scheduleReconnect...")
 				s.scheduleReconnect(&reconnectTimer)
+			} else {
+				debugLog("Not scheduling reconnect because isReconnecting=true")
 			}
 		}
 	}
@@ -516,6 +530,10 @@ func (s *Socket) doDisconnect() {
 	s.state = StateClosing
 	s.connected = false
 
+	// Stop reconnection attempts for manual disconnect
+	s.isReconnecting = false
+	s.reconnectTries = 0
+
 	// Close all channels first
 	for _, ch := range s.channels {
 		ch.cancel() // Cancel the channel's context
@@ -638,12 +656,15 @@ func (s *Socket) shouldReconnectOnError(err error) bool {
 
 // scheduleReconnect schedules a reconnection attempt with backoff
 func (s *Socket) scheduleReconnect(reconnectTimer **time.Timer) {
+	debugLog("scheduleReconnect called")
 	if !*s.options.ReconnectEnabled {
+		debugLog("Reconnection disabled, not scheduling")
 		return
 	}
 
 	// Check max attempts limit
 	if s.options.MaxReconnectAttempts > 0 && s.reconnectTries >= s.options.MaxReconnectAttempts {
+		debugLog("Max reconnect attempts (%d) reached", s.options.MaxReconnectAttempts)
 		if s.options.Logger != nil {
 			s.options.Logger.Printf("Max reconnect attempts (%d) reached", s.options.MaxReconnectAttempts)
 		}
@@ -654,6 +675,7 @@ func (s *Socket) scheduleReconnect(reconnectTimer **time.Timer) {
 	s.isReconnecting = true
 	delay := s.options.ReconnectAfterMs(s.reconnectTries)
 
+	debugLog("Scheduling reconnect attempt %d in %v", s.reconnectTries, delay)
 	if s.options.Logger != nil {
 		s.options.Logger.Printf("Scheduling reconnect attempt %d in %v", s.reconnectTries, delay)
 	}
@@ -661,10 +683,12 @@ func (s *Socket) scheduleReconnect(reconnectTimer **time.Timer) {
 	// Stop any existing timer
 	if *reconnectTimer != nil {
 		(*reconnectTimer).Stop()
+		debugLog("Stopped existing reconnect timer")
 	}
 
 	// Start new reconnection timer
 	*reconnectTimer = time.NewTimer(delay)
+	debugLog("Started new reconnect timer with delay %v", delay)
 }
 
 func (s *Socket) readMessages() {
@@ -682,14 +706,21 @@ func (s *Socket) readMessages() {
 			}
 
 			// Check if this is a close error that should trigger reconnection
-			if s.shouldReconnectOnError(err) {
+			shouldReconnect := s.shouldReconnectOnError(err)
+			debugLog("Read error: %v, shouldReconnect: %v", err, shouldReconnect)
+			if shouldReconnect {
 				// Signal connection error to socket manager for reconnection
+				debugLog("Sending connection error to manager")
 				select {
 				case s.connectionError <- err:
+					debugLog("Successfully sent connection error to manager")
 				case <-s.ctx.Done():
+					debugLog("Context canceled while sending connection error")
 				default:
-					// If channel is full, just log and return
+					debugLog("Connection error channel is full")
 				}
+			} else {
+				debugLog("Not reconnecting due to error type")
 			}
 			return
 		}
