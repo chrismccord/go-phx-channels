@@ -611,14 +611,27 @@ func (s *Socket) sendHeartbeat() {
 }
 
 func (s *Socket) attemptReconnect() {
+	debugLog("attemptReconnect called")
 	if s.options.Logger != nil {
 		s.options.Logger.Printf("Attempting to reconnect...")
 	}
 	err := s.doConnect()
+	debugLog("doConnect returned: %v", err)
 	if err == nil {
+		debugLog("Reconnection successful, resetting state")
 		// Reset reconnection state on successful connection
 		s.reconnectTries = 0
 		s.isReconnecting = false
+	} else {
+		debugLog("Reconnection failed: %v, will schedule retry", err)
+		// Schedule another reconnection attempt since this one failed
+		// This is the missing piece! We need to signal the socket manager to schedule another attempt
+		select {
+		case s.connectionError <- err:
+			debugLog("Sent reconnection failure to manager for retry")
+		default:
+			debugLog("Could not send reconnection failure - channel full")
+		}
 	}
 }
 
