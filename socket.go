@@ -624,8 +624,9 @@ func (s *Socket) attemptReconnect() {
 		s.isReconnecting = false
 	} else {
 		debugLog("Reconnection failed: %v, will schedule retry", err)
+		// CRITICAL: Reset isReconnecting so the retry can be scheduled
+		s.isReconnecting = false
 		// Schedule another reconnection attempt since this one failed
-		// This is the missing piece! We need to signal the socket manager to schedule another attempt
 		select {
 		case s.connectionError <- err:
 			debugLog("Sent reconnection failure to manager for retry")
