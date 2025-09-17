@@ -34,7 +34,7 @@ type SocketOptions struct {
 	AuthToken string
 
 	// ReconnectEnabled controls automatic reconnection (default: true)
-	ReconnectEnabled bool
+	ReconnectEnabled *bool
 
 	// MaxReconnectAttempts limits reconnection attempts (0 = unlimited)
 	MaxReconnectAttempts int
@@ -77,6 +77,11 @@ func setDefaultOptions(options *SocketOptions) {
 	if options.Params == nil {
 		options.Params = make(map[string]interface{})
 	}
+	// ReconnectEnabled defaults to true
+	if options.ReconnectEnabled == nil {
+		enabled := true
+		options.ReconnectEnabled = &enabled
+	}
 }
 
 // SocketCommand represents commands sent to the socket manager
@@ -102,10 +107,11 @@ type Socket struct {
 	options  *SocketOptions
 
 	// Communication channels
-	commands     chan SocketCommand
-	outbound     chan *Message  // Messages to send
-	inbound      chan *Message  // Messages received
-	shutdown     chan struct{}
+	commands        chan SocketCommand
+	outbound        chan *Message  // Messages to send
+	inbound         chan *Message  // Messages received
+	shutdown        chan struct{}
+	connectionError chan error     // Connection error signals
 
 	// State (only accessed by socket manager goroutine)
 	conn         *websocket.Conn
@@ -114,6 +120,10 @@ type Socket struct {
 	channels     map[string]*Channel
 	ref          int64
 	sendBuffer   []func()
+
+	// Reconnection state
+	reconnectTries  int
+	isReconnecting  bool
 
 	// For external state queries (read-only after creation)
 	serializer   *Serializer
@@ -134,17 +144,18 @@ func NewSocket(endpoint string, options *SocketOptions) *Socket {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	s := &Socket{
-		endpoint:   endpoint,
-		options:    options,
-		commands:   make(chan SocketCommand, 100),
-		outbound:   make(chan *Message, 100),
-		inbound:    make(chan *Message, 100),
-		shutdown:   make(chan struct{}),
-		channels:   make(map[string]*Channel),
-		state:      StateClosed,
-		serializer: NewSerializer(),
-		ctx:        ctx,
-		cancel:     cancel,
+		endpoint:        endpoint,
+		options:         options,
+		commands:        make(chan SocketCommand, 100),
+		outbound:        make(chan *Message, 100),
+		inbound:         make(chan *Message, 100),
+		shutdown:        make(chan struct{}),
+		connectionError: make(chan error, 10),
+		channels:        make(map[string]*Channel),
+		state:           StateClosed,
+		serializer:      NewSerializer(),
+		ctx:             ctx,
+		cancel:          cancel,
 	}
 
 	// Start the socket manager goroutine
@@ -207,6 +218,23 @@ func (s *Socket) socketManager() {
 			return nil
 		}():
 			s.attemptReconnect()
+
+		// Connection error from readMessages/writeMessages
+		case err := <-s.connectionError:
+			if s.options.Logger != nil {
+				s.options.Logger.Printf("Connection error: %v", err)
+			}
+			// Mark as disconnected
+			s.connected = false
+			s.state = StateClosed
+			if s.conn != nil {
+				s.conn.Close()
+				s.conn = nil
+			}
+			// Schedule reconnection if not manually disconnected
+			if !s.isReconnecting {
+				s.scheduleReconnect(&reconnectTimer)
+			}
 		}
 	}
 }
@@ -534,9 +562,15 @@ func (s *Socket) sendMessage(msg *Message) {
 		if s.options.Logger != nil {
 			s.options.Logger.Printf("Failed to send message: %v", err)
 		}
-		// Handle connection error
-		s.connected = false
-		s.state = StateClosed
+		// Signal connection error to socket manager
+		select {
+		case s.connectionError <- err:
+		case <-s.ctx.Done():
+		default:
+			// If channel is full, just handle it directly
+			s.connected = false
+			s.state = StateClosed
+		}
 	}
 }
 
@@ -554,7 +588,43 @@ func (s *Socket) attemptReconnect() {
 	if s.options.Logger != nil {
 		s.options.Logger.Printf("Attempting to reconnect...")
 	}
-	s.doConnect()
+	err := s.doConnect()
+	if err == nil {
+		// Reset reconnection state on successful connection
+		s.reconnectTries = 0
+		s.isReconnecting = false
+	}
+}
+
+// scheduleReconnect schedules a reconnection attempt with backoff
+func (s *Socket) scheduleReconnect(reconnectTimer **time.Timer) {
+	if !*s.options.ReconnectEnabled {
+		return
+	}
+
+	// Check max attempts limit
+	if s.options.MaxReconnectAttempts > 0 && s.reconnectTries >= s.options.MaxReconnectAttempts {
+		if s.options.Logger != nil {
+			s.options.Logger.Printf("Max reconnect attempts (%d) reached", s.options.MaxReconnectAttempts)
+		}
+		return
+	}
+
+	s.reconnectTries++
+	s.isReconnecting = true
+	delay := s.options.ReconnectAfterMs(s.reconnectTries)
+
+	if s.options.Logger != nil {
+		s.options.Logger.Printf("Scheduling reconnect attempt %d in %v", s.reconnectTries, delay)
+	}
+
+	// Stop any existing timer
+	if *reconnectTimer != nil {
+		(*reconnectTimer).Stop()
+	}
+
+	// Start new reconnection timer
+	*reconnectTimer = time.NewTimer(delay)
 }
 
 func (s *Socket) readMessages() {
@@ -571,6 +641,13 @@ func (s *Socket) readMessages() {
 				if s.options.Logger != nil {
 					s.options.Logger.Printf("WebSocket error: %v", err)
 				}
+			}
+			// Signal connection error to socket manager
+			select {
+			case s.connectionError <- err:
+			case <-s.ctx.Done():
+			default:
+				// If channel is full, just log and return
 			}
 			return
 		}

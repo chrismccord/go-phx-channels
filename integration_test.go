@@ -350,9 +350,10 @@ func TestIntegrationReconnection(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
+	reconnectEnabled := true
 	options := &phx.SocketOptions{
 		Logger:                log.New(os.Stdout, "Reconnect: ", log.LstdFlags),
-		ReconnectEnabled:      true,
+		ReconnectEnabled:      &reconnectEnabled,
 		MaxReconnectAttempts:  3,
 		HeartbeatInterval:     1 * time.Second,
 	}
