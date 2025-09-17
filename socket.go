@@ -133,6 +133,9 @@ type Socket struct {
 	reconnectTries  int
 	isReconnecting  bool
 
+	// Event callbacks
+	openCallbacks []func()
+
 	// For external state queries (read-only after creation)
 	serializer   *Serializer
 
@@ -328,6 +331,13 @@ func (s *Socket) handleCommand(cmd SocketCommand) {
 		if cmd.Response != nil {
 			cmd.Response <- nil
 		}
+
+	case "add_open_callback":
+		callback := cmd.Data.(func())
+		s.openCallbacks = append(s.openCallbacks, callback)
+		if cmd.Response != nil {
+			cmd.Response <- nil
+		}
 	}
 }
 
@@ -468,22 +478,14 @@ func (s *Socket) Push(msg *Message) {
 
 // OnOpen registers a callback for when the socket connects
 func (s *Socket) OnOpen(callback func()) {
-	// For now, just store the callback and call it when connecting
-	// This is a simple implementation for API compatibility
-	go func() {
-		for {
-			select {
-			case <-s.ctx.Done():
-				return
-			default:
-				if s.IsConnected() {
-					callback()
-					return
-				}
-				time.Sleep(100 * time.Millisecond)
-			}
-		}
-	}()
+	// Send the callback to the socket manager to store it
+	response := make(chan interface{})
+	s.commands <- SocketCommand{
+		Type: "add_open_callback",
+		Data: callback,
+		Response: response,
+	}
+	<-response // Wait for acknowledgment
 }
 
 // Private methods (only called by socket manager goroutine)
@@ -514,6 +516,21 @@ func (s *Socket) doConnect() error {
 		sendFn()
 	}
 	s.sendBuffer = s.sendBuffer[:0]
+
+	// Trigger open callbacks
+	for _, callback := range s.openCallbacks {
+		go callback()
+	}
+
+	// Rejoin all previously joined channels
+	for _, channel := range s.channels {
+		if channel.IsJoined() || channel.IsJoining() {
+			debugLog("Rejoining channel %s after reconnection", channel.topic)
+			go func(ch *Channel) {
+				ch.Join()
+			}(channel)
+		}
+	}
 
 	if s.options.Logger != nil {
 		s.options.Logger.Printf("Connected to %s", s.endpoint)
