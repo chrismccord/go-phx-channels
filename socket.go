@@ -562,12 +562,20 @@ func (s *Socket) sendMessage(msg *Message) {
 		if s.options.Logger != nil {
 			s.options.Logger.Printf("Failed to send message: %v", err)
 		}
-		// Signal connection error to socket manager
-		select {
-		case s.connectionError <- err:
-		case <-s.ctx.Done():
-		default:
-			// If channel is full, just handle it directly
+
+		// Check if this should trigger reconnection
+		if s.shouldReconnectOnError(err) {
+			// Signal connection error to socket manager for reconnection
+			select {
+			case s.connectionError <- err:
+			case <-s.ctx.Done():
+			default:
+				// If channel is full, just handle it directly
+				s.connected = false
+				s.state = StateClosed
+			}
+		} else {
+			// Graceful close - just mark as disconnected
 			s.connected = false
 			s.state = StateClosed
 		}
@@ -594,6 +602,38 @@ func (s *Socket) attemptReconnect() {
 		s.reconnectTries = 0
 		s.isReconnecting = false
 	}
+}
+
+// shouldReconnectOnError determines if an error should trigger reconnection
+// Mirrors the Phoenix JavaScript client logic: !closeWasClean && closeCode !== 1000
+func (s *Socket) shouldReconnectOnError(err error) bool {
+	if !*s.options.ReconnectEnabled {
+		return false
+	}
+
+	// Check if it's a WebSocket close error
+	if closeErr, ok := err.(*websocket.CloseError); ok {
+		// Reconnect on unexpected close codes (not normal closure)
+		// WebSocket close code 1000 = Normal Closure (should NOT reconnect)
+		// Other codes like 1001, 1006, etc. should trigger reconnection
+		if closeErr.Code == websocket.CloseNormalClosure { // 1000
+			if s.options.Logger != nil {
+				s.options.Logger.Printf("WebSocket closed normally (1000) - not reconnecting")
+			}
+			return false
+		}
+
+		if s.options.Logger != nil {
+			s.options.Logger.Printf("WebSocket closed unexpectedly (code %d) - will reconnect", closeErr.Code)
+		}
+		return true
+	}
+
+	// For other connection errors (network issues, etc.), attempt reconnection
+	if s.options.Logger != nil {
+		s.options.Logger.Printf("Connection error (not close) - will reconnect: %v", err)
+	}
+	return true
 }
 
 // scheduleReconnect schedules a reconnection attempt with backoff
@@ -637,17 +677,19 @@ func (s *Socket) readMessages() {
 
 		_, data, err := s.conn.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				if s.options.Logger != nil {
-					s.options.Logger.Printf("WebSocket error: %v", err)
-				}
+			if s.options.Logger != nil {
+				s.options.Logger.Printf("WebSocket read error: %v", err)
 			}
-			// Signal connection error to socket manager
-			select {
-			case s.connectionError <- err:
-			case <-s.ctx.Done():
-			default:
-				// If channel is full, just log and return
+
+			// Check if this is a close error that should trigger reconnection
+			if s.shouldReconnectOnError(err) {
+				// Signal connection error to socket manager for reconnection
+				select {
+				case s.connectionError <- err:
+				case <-s.ctx.Done():
+				default:
+					// If channel is full, just log and return
+				}
 			}
 			return
 		}
