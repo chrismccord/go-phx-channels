@@ -525,9 +525,9 @@ func (s *Socket) doConnect() error {
 	// Rejoin all previously joined channels
 	for _, channel := range s.channels {
 		if channel.IsJoined() || channel.IsJoining() {
-			debugLog("Rejoining channel %s after reconnection", channel.topic)
+			debugLog("Rejoining channel %s after reconnection", channel.Topic())
 			go func(ch *Channel) {
-				ch.Join()
+				ch.Rejoin()
 			}(channel)
 		}
 	}

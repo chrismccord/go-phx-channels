@@ -181,6 +181,12 @@ func (ch *Channel) handleCommand(cmd ChannelCommand) {
 
 	case "join_error":
 		ch.state = ChannelErrored
+
+	case "rejoin":
+		result := ch.doRejoin(cmd.Data)
+		if cmd.Response != nil {
+			cmd.Response <- result
+		}
 	}
 }
 
@@ -351,6 +357,26 @@ func (ch *Channel) JoinRef() string {
 	return (<-response).(string)
 }
 
+// Rejoin rejoins the channel after reconnection, bypassing the joinedOnce check
+func (ch *Channel) Rejoin(timeout ...time.Duration) *Push {
+	var rejoinTimeout time.Duration = ch.timeout
+	if len(timeout) > 0 {
+		rejoinTimeout = timeout[0]
+	}
+
+	response := make(chan interface{}, 1)
+	ch.commands <- ChannelCommand{
+		Type: "rejoin",
+		Data: map[string]interface{}{
+			"timeout": rejoinTimeout,
+		},
+		Response: response,
+	}
+
+	result := <-response
+	return result.(*Push)
+}
+
 // HandleMessage is called by the socket to deliver messages to this channel
 func (ch *Channel) HandleMessage(msg *Message) {
 	select {
@@ -432,6 +458,39 @@ func (ch *Channel) doJoin(data interface{}) *Push {
 	joinPush.Send()
 
 	return joinPush
+}
+
+func (ch *Channel) doRejoin(data interface{}) *Push {
+	params := data.(map[string]interface{})
+	timeout := params["timeout"].(time.Duration)
+
+	// Reset state for rejoin - this allows rejoining after disconnection
+	ch.state = ChannelJoining
+	ch.joinRef = ch.socket.MakeRef()
+
+	// Create rejoin push (same as join, but bypasses joinedOnce check)
+	rejoinPush := NewPush(ch, "phx_join", func() interface{} {
+		return ch.params
+	}, timeout)
+
+	// Set up rejoin push callbacks
+	rejoinPush.Receive("ok", func(resp interface{}) {
+		ch.commands <- ChannelCommand{
+			Type: "join_success",
+		}
+	})
+
+	rejoinPush.Receive("error", func(reason interface{}) {
+		ch.commands <- ChannelCommand{
+			Type: "join_error",
+			Data: reason,
+		}
+	})
+
+	// Send the rejoin message
+	rejoinPush.Send()
+
+	return rejoinPush
 }
 
 func (ch *Channel) doLeave(data interface{}) *Push {
